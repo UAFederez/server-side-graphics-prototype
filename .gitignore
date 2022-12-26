@@ -1,0 +1,5 @@
+render-server/.vscode
+render-server/*.out
+render-server/build
+
+nodejs-server/node_modules
