@@ -44,10 +44,16 @@
         <script>
             let socket = io();
             let idx = 0;
+            let frameStart = 0;
+            let frameFinished = frameStart;
+            let isRunning = false;
+
+            const ticks_per_msec = 1e-2;
 
             const canvas = document.querySelector("#viewport");
             const responseText = document.querySelector("#responseText");
-            function requestFrame() {
+            function requestFrame(dt) {
+                frameStart = performance.now();
                 socket.emit("requestFrame", {
                     width: canvas.width,
                     height: canvas.height,
@@ -55,34 +61,30 @@
                 });
             }
 
-            let isRunning = false;
-            let intervalId = 0;
-
-            function animate() {
+            function animate(dt) {
                 if (isRunning) {
                     requestAnimationFrame(animate);
-                    idx += 1;
-                    requestFrame();
+                    requestFrame(dt);
                 }
             }
 
             function onClickAnimateBtn() {
                 isRunning = !isRunning;
                 if (isRunning) {
-                    intervalId = setInterval(() => {
-                        idx += 1;
-                        requestFrame();
-                    }, 1000 / 144.0);
-                } else {
-                    console.log("stop");
-                    clearInterval(intervalId);
+                    animate();
                 }
             }
 
             socket.on("responseFrame", ({ error, data }) => {
                 if (!error) {
+                    frameFinished = performance.now();
+                    idx += (frameFinished - frameStart) * ticks_per_msec;
                     viewport.src = ` data:image/jpeg;charset=utf-8;base64,${data}`;
-                    console.log(data);
+                    const mspf = frameFinished - frameStart;
+                    const fps = 1000.0 / mspf;
+                    responseText.innerHTML = `ms/frame ${mspf.toFixed(
+                        2
+                    )} ms (FPS: ${fps.toFixed(2)})`;
                 } else {
                     alert(error);
                 }

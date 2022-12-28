@@ -26,46 +26,64 @@ const RADIUS = 2.0;
 
 io.on("connection", (socket) => {
     console.log("Client connected");
+    let lastRenderedFrame = null;
+    let hasFinishedRender = false;
+    let hasStartedRender = false;
+
+    let renderSocket = null;
+
     socket.on("requestFrame", (info) => {
-        const renderSocket = net.connect(
-            { host: "127.0.0.1", port: 3434 },
-            () => {
-                console.log("Connected to server");
-                const imageDimensions = Uint32Array.from([
-                    info.width,
-                    info.height,
-                ]);
-                console.log(info);
-                const lightPosition = Float32Array.from([
-                    Math.sin(info.idx) * RADIUS,
-                    2.0,
-                    Math.cos(info.idx) * RADIUS,
-                ]);
-                const spherePosition = Float32Array.from([0, 0.0, 2.0]);
+        if (!hasStartedRender) {
+            hasStartedRender = true;
+            hasFinishedRender = false;
 
-                const message = collectArraysAsOneBuffer([
-                    imageDimensions,
-                    lightPosition,
-                    spherePosition,
-                ]);
-                renderSocket.write(message);
+            const renderSocket = net.connect(
+                { host: "127.0.0.1", port: 3434 },
+                () => {
+                    const imageDimensions = Uint32Array.from([
+                        info.width,
+                        info.height,
+                    ]);
+                    const spherePosition = Float32Array.from([
+                        Math.sin(info.idx) * RADIUS,
+                        0.0,
+                        4.0 + Math.cos(info.idx) * RADIUS,
+                    ]);
+                    const lightPosition = Float32Array.from([0, 2.0, 2.0]);
+
+                    const message = collectArraysAsOneBuffer([
+                        imageDimensions,
+                        lightPosition,
+                        spherePosition,
+                    ]);
+                    renderSocket.write(message);
+                }
+            );
+
+            renderSocket.on("data", (data) => {
+                hasFinishedRender = true;
+                hasStartedRender = false;
+                lastRenderedFrame = data.toString();
+                socket.emit("responseFrame", {
+                    error: null,
+                    data: lastRenderedFrame,
+                });
+            });
+
+            renderSocket.on("error", (error) => {
+                socket.emit("responseFrame", {
+                    error: `No connection: ${error}`,
+                    data: [],
+                });
+            });
+        } else {
+            if (!hasFinishedRender && lastRenderedFrame) {
+                socket.emit("responseFrame", {
+                    error: null,
+                    data: lastRenderedFrame,
+                });
             }
-        );
-
-        renderSocket.on("data", (data) => {
-            console.log("Received response");
-            socket.emit("responseFrame", {
-                error: null,
-                data: data.toString(),
-            });
-        });
-
-        renderSocket.on("error", (error) => {
-            socket.emit("responseFrame", {
-                error: `No connection: ${error}`,
-                data: [],
-            });
-        });
+        }
     });
 });
 
