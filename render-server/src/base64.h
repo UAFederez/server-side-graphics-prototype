@@ -1,6 +1,7 @@
 #ifndef BASIC_BASE64_FUNCTIONS_H
 #define BASIC_BASE64_FUNCTIONS_H
 
+#include <stddef.h>
 #include <math.h>
 #include <time.h>
 
@@ -55,9 +56,11 @@ char* base64_encode(const char* source, size_t len)
     return result;
 }
 
+// While not faster in terms of algorithmic complexity, the (somewhat ugly) loop below 
+// provides a hint to the compiler to optimize the code using SIMD instructions
 char* base64_encode_fast(const char* source, size_t len)
 {
-    size_t result_len  = ceil((float)len * 4.0f / 3.0f);
+    size_t result_len  = ceilf((float)len * 4.0f / 3.0f);
     size_t num_padding = (4 - (result_len % 4)) % 4;
     size_t string_len  = result_len + num_padding + 1;
     char*  result      = (char*) malloc(string_len);
