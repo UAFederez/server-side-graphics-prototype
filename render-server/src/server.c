@@ -17,9 +17,56 @@
 #define STBI_WRITE_NO_STDIO
 #include <stb_image_write.h>
 
+#define THREAD_POOL_SIZE    8
 #define PORT                "3434"  // the port which users will connect to
 #define MAX_REQUEST_QUEUED  10      // how many pending connections to store in the queue
 #define NUM_CHANNELS        4       // render using RGBA
+
+struct client_list {
+    int    client_fd;
+    struct client_list* next;
+};
+
+typedef struct {
+    struct client_list* front;
+    struct client_list* back;
+    uint32_t size;
+} ClientQueue;
+
+void enqueue_client(ClientQueue* queue, int new_client)
+{
+    struct client_list* new_node = (struct client_list*) malloc(sizeof(struct client_list));
+    new_node->client_fd = new_client;
+    new_node->next      = NULL;
+
+    if(queue->front == NULL) {
+        queue->front = new_node;
+        queue->back  = queue->front;
+    } else {
+        queue->back->next = new_node;
+        queue->back = new_node;
+    }
+
+    queue->size++;
+}
+
+struct client_list* dequeue_client(ClientQueue* queue)
+{
+    if(queue->front == NULL) {
+        return NULL;
+    } 
+
+    struct client_list* front = queue->front;
+    queue->front  = queue->front->next;
+
+    return front;
+}
+
+typedef struct {
+    pthread_mutex_t mtx;
+    pthread_cond_t  cv;
+    ClientQueue     clients; 
+} ThreadContext;
 
 void write_to_response_stbi(void* context, void* data, int size)
 {
@@ -69,11 +116,6 @@ void render_image(RenderRequest* request, RenderResponse* response)
 
     uint8_t* current_pixel = response->pixel_buffer.data;
 
-    printf("Sphere center: %.2f, %.2f, %.2f\n", 
-            request->sphere_pos.x,
-            request->sphere_pos.y,
-            request->sphere_pos.z);
-
     Vector3f camera_pos = { 0.0f, 0.0f, 0.0f };
     Vector3f ray_dir    = { 0.0f, 0.0f, 0.0f };
     for(uint32_t y = 0; y < request->image_height; y++) {
@@ -109,21 +151,18 @@ void render_image(RenderRequest* request, RenderResponse* response)
     response->image_base64_encoded.size = strlen(response->image_base64_encoded.data);
 }
 
-void* handle_client_connection(void* data)
+void handle_client_connection(int client_socket)
 {
-    int client_socket = *((int*)data);
-    free(data);
-
     RenderRequest request;
     memset(&request, 0, sizeof(request));
 
     int num_bytes_received = recv(client_socket, &request, sizeof(request), 0);
     if (num_bytes_received < 0) {
         fprintf(stderr, "Error: %d\n", errno);
-        return NULL;
+        return;
     }
 
-    printf("Received %d bytes from the client. Expected %lu\n", num_bytes_received, sizeof(request));
+    //printf("Received %d bytes from the client. Expected %lu\n", num_bytes_received, sizeof(request));
 
     RenderResponse response;
     memset(&response, 0, sizeof(response));
@@ -139,12 +178,36 @@ void* handle_client_connection(void* data)
         fprintf(stderr, "Error: %d\n", errno);
     }
 
-    printf("Replied with %d bytes\n", num_bytes_sent);
+    //printf("Replied with %d bytes\n", num_bytes_sent);
 
+    deallocate_buffer(&response.pixel_buffer);
     deallocate_buffer(&response.image_raw_bytes);
     deallocate_buffer(&response.image_base64_encoded);
     close(client_socket);
 
+    return;
+}
+
+void* thread_client_handler(void* ctx)
+{
+    ThreadContext* context = (ThreadContext*) ctx;
+    printf("Thread ready to accept connections!\n");
+    for(;;) {
+        pthread_mutex_lock(&context->mtx);
+        struct client_list* next_client = dequeue_client(&context->clients);
+        if(next_client == NULL) {
+            pthread_cond_wait(&context->cv, &context->mtx);
+            next_client = dequeue_client(&context->clients);
+        }
+        pthread_mutex_unlock(&context->mtx);
+
+        if(next_client != NULL) {
+            // We have a new client
+            handle_client_connection(next_client->client_fd);
+            close(next_client->client_fd);
+            free(next_client);
+        }
+    }
     return NULL;
 }
 
@@ -188,6 +251,16 @@ int main()
         return 1;
     }
 
+    ThreadContext context = {};
+    pthread_mutex_init(&context.mtx, NULL);
+    pthread_cond_init(&context.cv, NULL);
+    memset(&context.clients, 0, sizeof(context.clients));
+
+    pthread_t thread_pool[THREAD_POOL_SIZE];
+    for(int i = 0; i < THREAD_POOL_SIZE; i++) {
+        pthread_create(&thread_pool[i], NULL, &thread_client_handler, (void*)&context);
+    }
+
     // Mark the socket as passive, e.g. a socket that will be used to listen for incoming connections
     printf("Marking the socket as a passive (listening) socket\n");
     if (listen(listening_socket, MAX_REQUEST_QUEUED) < 0) {
@@ -228,16 +301,12 @@ int main()
 
         printf("Received a connection from host %s\n", client_address);
 
-        // This is done so that we can pass the socket file descriptor to the thread
-        // function without having to worry about where the fd is stored, the thread
-        // should immediately deallocate it anyway once it copies the int
-        int* ptr_client_socket = malloc(sizeof(int));
-        *ptr_client_socket = client_socket;
+        pthread_mutex_lock(&context.mtx);
+        enqueue_client(&context.clients, client_socket);
+        pthread_cond_signal(&context.cv);
+        pthread_mutex_unlock(&context.mtx);
 
-        pthread_t thread;
-        pthread_create(&thread, NULL, handle_client_connection, (void*) ptr_client_socket);
     }
-
 
     close(listening_socket);
 }
