@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "vector3f.h"
+#include "buffer.h"
 
 typedef struct {
     uint32_t image_width;
@@ -10,11 +11,6 @@ typedef struct {
     Vector3f light_pos;
     Vector3f sphere_pos;
 } RenderRequest;
-
-typedef struct {
-    uint8_t* data;
-    uint32_t size;
-} Buffer;
 
 typedef struct {
     Buffer pixel_buffer;         // Just the flat array of each pixel color
