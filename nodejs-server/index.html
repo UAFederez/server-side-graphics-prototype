@@ -23,30 +23,70 @@
                 flex-direction: column;
                 align-items: center;
             }
-
-            #viewport {
-                border: 1px solid black;
+            #responseText {
+                max-width: 50rem;
+                word-wrap: break-word;
             }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="">
-                <canvas id="viewport" width="512" height="512"></canvas>
+                <p id="responseText"></p>
+                <img id="viewport" width="512" height="512" />
             </div>
-            <button onclick="requestFrame()">Request Frame</button>
+            <div>
+                <button onclick="requestFrame()">Request Frame</button>
+                <button onclick="onClickAnimateBtn()">Toggle Animate</button>
+            </div>
         </div>
         <script src="/socket.io/socket.io.js"></script>
         <script>
             let socket = io();
+            let idx = 0;
 
             const canvas = document.querySelector("#viewport");
+            const responseText = document.querySelector("#responseText");
             function requestFrame() {
                 socket.emit("requestFrame", {
                     width: canvas.width,
                     height: canvas.height,
+                    idx,
                 });
             }
+
+            let isRunning = false;
+            let intervalId = 0;
+
+            function animate() {
+                if (isRunning) {
+                    requestAnimationFrame(animate);
+                    idx += 1;
+                    requestFrame();
+                }
+            }
+
+            function onClickAnimateBtn() {
+                isRunning = !isRunning;
+                if (isRunning) {
+                    intervalId = setInterval(() => {
+                        idx += 1;
+                        requestFrame();
+                    }, 1000 / 144.0);
+                } else {
+                    console.log("stop");
+                    clearInterval(intervalId);
+                }
+            }
+
+            socket.on("responseFrame", ({ error, data }) => {
+                if (!error) {
+                    viewport.src = ` data:image/jpeg;charset=utf-8;base64,${data}`;
+                    console.log(data);
+                } else {
+                    alert(error);
+                }
+            });
         </script>
     </body>
 </html>
