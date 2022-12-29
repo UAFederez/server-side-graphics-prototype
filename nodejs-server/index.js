@@ -30,60 +30,49 @@ io.on("connection", (socket) => {
     let hasFinishedRender = false;
     let hasStartedRender = false;
 
-    let renderSocket = null;
-
     socket.on("requestFrame", (info) => {
-        if (!hasStartedRender) {
-            hasStartedRender = true;
-            hasFinishedRender = false;
+        hasStartedRender = true;
+        hasFinishedRender = false;
 
-            const renderSocket = net.connect(
-                { host: "127.0.0.1", port: 3434 },
-                () => {
-                    const imageDimensions = Uint32Array.from([
-                        info.width,
-                        info.height,
-                    ]);
-                    const spherePosition = Float32Array.from([
-                        Math.sin(info.idx) * RADIUS,
-                        0.0,
-                        4.0 + Math.cos(info.idx) * RADIUS,
-                    ]);
-                    const lightPosition = Float32Array.from([0, 2.0, 2.0]);
+        const renderSocket = net.connect(
+            { host: "127.0.0.1", port: 3434 },
+            () => {
+                const imageDimensions = Uint32Array.from([
+                    info.width,
+                    info.height,
+                ]);
+                const spherePosition = Float32Array.from([
+                    Math.sin(info.idx) * RADIUS,
+                    0.0,
+                    4.0 + Math.cos(info.idx) * RADIUS,
+                ]);
+                const lightPosition = Float32Array.from([0, 2.0, 2.0]);
 
-                    const message = collectArraysAsOneBuffer([
-                        imageDimensions,
-                        lightPosition,
-                        spherePosition,
-                    ]);
-                    renderSocket.write(message);
-                }
-            );
-
-            renderSocket.on("data", (data) => {
-                hasFinishedRender = true;
-                hasStartedRender = false;
-                lastRenderedFrame = data.toString();
-                socket.emit("responseFrame", {
-                    error: null,
-                    data: lastRenderedFrame,
-                });
-            });
-
-            renderSocket.on("error", (error) => {
-                socket.emit("responseFrame", {
-                    error: `No connection: ${error}`,
-                    data: [],
-                });
-            });
-        } else {
-            if (!hasFinishedRender && lastRenderedFrame) {
-                socket.emit("responseFrame", {
-                    error: null,
-                    data: lastRenderedFrame,
-                });
+                const message = collectArraysAsOneBuffer([
+                    imageDimensions,
+                    lightPosition,
+                    spherePosition,
+                ]);
+                renderSocket.write(message);
             }
-        }
+        );
+
+        renderSocket.on("data", (data) => {
+            hasFinishedRender = true;
+            hasStartedRender = false;
+            lastRenderedFrame = data.toString();
+            socket.emit("responseFrame", {
+                error: null,
+                data: lastRenderedFrame,
+            });
+        });
+
+        renderSocket.on("error", (error) => {
+            socket.emit("responseFrame", {
+                error: `No connection: ${error}`,
+                data: [],
+            });
+        });
     });
 });
 

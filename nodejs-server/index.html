@@ -48,6 +48,8 @@
             let frameFinished = frameStart;
             let isRunning = false;
 
+            let queue = [];
+
             const ticks_per_msec = 1e-2;
 
             const canvas = document.querySelector("#viewport");
@@ -64,6 +66,10 @@
             function animate(dt) {
                 if (isRunning) {
                     requestAnimationFrame(animate);
+                    if (queue.length > 0) {
+                        const data = queue.pop();
+                        viewport.src = ` data:image/jpeg;charset=utf-8;base64,${data}`;
+                    }
                     requestFrame(dt);
                 }
             }
@@ -72,6 +78,8 @@
                 isRunning = !isRunning;
                 if (isRunning) {
                     animate();
+                } else {
+                    queue = [];
                 }
             }
 
@@ -79,12 +87,13 @@
                 if (!error) {
                     frameFinished = performance.now();
                     idx += (frameFinished - frameStart) * ticks_per_msec;
-                    viewport.src = ` data:image/jpeg;charset=utf-8;base64,${data}`;
+
+                    queue.unshift(data);
                     const mspf = frameFinished - frameStart;
                     const fps = 1000.0 / mspf;
                     responseText.innerHTML = `ms/frame ${mspf.toFixed(
                         2
-                    )} ms (FPS: ${fps.toFixed(2)})`;
+                    )} ms (FPS: ${fps.toFixed(2)}) ${queue.length}`;
                 } else {
                     alert(error);
                 }
