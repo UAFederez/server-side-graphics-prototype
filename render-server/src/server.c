@@ -10,57 +10,18 @@
 #include <pthread.h>
 #include <stdlib.h>
 
-#include "server.h"
-#include "base64.h"
-
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STBI_WRITE_NO_STDIO
 #include <stb_image_write.h>
+
+#include "server.h"
+#include "base64.h"
+#include "client_queue.h"
 
 #define THREAD_POOL_SIZE    8
 #define PORT                "3434"  // the port which users will connect to
 #define MAX_REQUEST_QUEUED  10      // how many pending connections to store in the queue
 #define NUM_CHANNELS        4       // render using RGBA
-
-struct client_list {
-    int    client_fd;
-    struct client_list* next;
-};
-
-typedef struct {
-    struct client_list* front;
-    struct client_list* back;
-    uint32_t size;
-} ClientQueue;
-
-void enqueue_client(ClientQueue* queue, int new_client)
-{
-    struct client_list* new_node = (struct client_list*) malloc(sizeof(struct client_list));
-    new_node->client_fd = new_client;
-    new_node->next      = NULL;
-
-    if(queue->front == NULL) {
-        queue->front = new_node;
-        queue->back  = queue->front;
-    } else {
-        queue->back->next = new_node;
-        queue->back = new_node;
-    }
-
-    queue->size++;
-}
-
-struct client_list* dequeue_client(ClientQueue* queue)
-{
-    if(queue->front == NULL) {
-        return NULL;
-    } 
-
-    struct client_list* front = queue->front;
-    queue->front  = queue->front->next;
-
-    return front;
-}
 
 typedef struct {
     pthread_mutex_t mtx;
@@ -68,148 +29,12 @@ typedef struct {
     ClientQueue     clients; 
 } ThreadContext;
 
-void write_to_response_stbi(void* context, void* data, int size)
-{
-    RenderResponse* response = ((RenderResponse*)context);
-    append_to_buffer(&response->image_raw_bytes, data, size);
-}
-
-float calc_ray_sphere_intersect(Vector3f ray_orig, Vector3f ray_dir, Vector3f sphere_pos)
-{
-    Vector3f oc = sub_v3f(ray_orig, sphere_pos);
-    float a = dot_v3f(ray_dir, ray_dir);
-    float b = 2.0 * dot_v3f(oc, ray_dir);
-    float c = dot_v3f(oc, oc) - (0.5f * 0.5f);
-    float d = b * b - (4 * a * c);
-
-    if(d < 0) {
-        return -1.0f;
-    }
-    return (-b - sqrt(d)) / (2.0 * a);
-}
-
-Vector3f trace_ray(Vector3f ray_orig, Vector3f ray_dir, RenderRequest* request)
-{
-    Vector3f ray_norm = normalize_v3f(&ray_dir);
-    Vector3f light = { 1.0f, 1.0f, 1.0f };
-    Vector3f dark  = { 0.0f, 0.0f, 0.0f };
-
-    float dist_along_ray = 0.0;
-    if((dist_along_ray = calc_ray_sphere_intersect(ray_orig, ray_norm, request->sphere_pos)) > 0) {
-        Vector3f point_on_sphere = add_v3f(ray_orig, mulf_v3f(ray_dir, dist_along_ray));
-        Vector3f normal = sub_v3f(point_on_sphere, request->sphere_pos);
-        Vector3f half = { 0.5, 0.5, 0.5 };
-        Vector3f vec_to_light = sub_v3f(request->light_pos, point_on_sphere);
-
-        float lightness = fmax(0.0f, dot_v3f(normal, normalize_v3f(&vec_to_light)));
-
-        return mulf_v3f(add_v3f(normal, half), lightness); 
-    }
-
-    return lerp_v3f(&light, &dark, 0.5f + ray_norm.y);
-}
-
-void render_image(RenderRequest* request, RenderResponse* response)
-{
-    const uint32_t num_image_bytes = request->image_width * request->image_height * NUM_CHANNELS;
-    response->pixel_buffer = allocate_buffer(num_image_bytes);
-
-    uint8_t* current_pixel = response->pixel_buffer.data;
-
-    Vector3f camera_pos = { 0.0f, 0.0f, 0.0f };
-    Vector3f ray_dir    = { 0.0f, 0.0f, 0.0f };
-    for(uint32_t y = 0; y < request->image_height; y++) {
-        for(uint32_t x = 0; x < request->image_width; x++) {
-
-            float u = (float) x / request->image_width;
-            float v = (float) y / request->image_height;
-
-            ray_dir.x = -0.5f + u;
-            ray_dir.y =  0.5f - v;
-            ray_dir.z =  1.0f;
-
-            Vector3f color = trace_ray(camera_pos, ray_dir, request);
-
-            current_pixel[0] = (uint8_t)( color.x * 255.0f);
-            current_pixel[1] = (uint8_t)( color.y * 255.0f);
-            current_pixel[2] = (uint8_t)( color.z * 255.0f);
-            current_pixel[3] = 0xFF;        
-            current_pixel += NUM_CHANNELS;
-        }   
-    }
-
-    stbi_write_jpg_to_func(&write_to_response_stbi,
-                           (void*) response,
-                           request->image_width,
-                           request->image_height,
-                           NUM_CHANNELS,
-                           response->pixel_buffer.data,
-                           25);
-
-    response->image_base64_encoded.data = (uint8_t*) base64_encode_fast((char*) response->image_raw_bytes.data,
-                                                                        response->image_raw_bytes.size);
-    response->image_base64_encoded.size = strlen(response->image_base64_encoded.data);
-}
-
-void handle_client_connection(int client_socket)
-{
-    RenderRequest request;
-    memset(&request, 0, sizeof(request));
-
-    int num_bytes_received = recv(client_socket, &request, sizeof(request), 0);
-    if (num_bytes_received < 0) {
-        fprintf(stderr, "Error: %d\n", errno);
-        return;
-    }
-
-    //printf("Received %d bytes from the client. Expected %lu\n", num_bytes_received, sizeof(request));
-
-    RenderResponse response;
-    memset(&response, 0, sizeof(response));
-
-    render_image(&request, &response);
-
-    int num_bytes_sent = send(client_socket, 
-                              response.image_base64_encoded.data, 
-                              response.image_base64_encoded.size,
-                              0);
-                              
-    if (num_bytes_sent < 0) {
-        fprintf(stderr, "Error: %d\n", errno);
-    }
-
-    //printf("Replied with %d bytes\n", num_bytes_sent);
-
-    deallocate_buffer(&response.pixel_buffer);
-    deallocate_buffer(&response.image_raw_bytes);
-    deallocate_buffer(&response.image_base64_encoded);
-    close(client_socket);
-
-    return;
-}
-
-void* thread_client_handler(void* ctx)
-{
-    ThreadContext* context = (ThreadContext*) ctx;
-    printf("Thread ready to accept connections!\n");
-    for(;;) {
-        pthread_mutex_lock(&context->mtx);
-        struct client_list* next_client = dequeue_client(&context->clients);
-        if(next_client == NULL) {
-            pthread_cond_wait(&context->cv, &context->mtx);
-            next_client = dequeue_client(&context->clients);
-        }
-        pthread_mutex_unlock(&context->mtx);
-
-        if(next_client != NULL) {
-            // We have a new client
-            handle_client_connection(next_client->client_fd);
-            close(next_client->client_fd);
-            free(next_client);
-        }
-    }
-    return NULL;
-}
+void write_to_response_stbi(void* context, void* data, int size);
+void render_image(RenderRequest* request, RenderResponse* response);
+void handle_client_connection(int client_socket);
+void* thread_client_handler(void* ctx);
+float calc_ray_sphere_intersect(Vector3f ray_orig, Vector3f ray_dir, Vector3f sphere_pos);
+Vector3f trace_ray(Vector3f ray_orig, Vector3f ray_dir, RenderRequest* request);
 
 int main()
 {
@@ -310,3 +135,147 @@ int main()
 
     close(listening_socket);
 }
+
+void write_to_response_stbi(void* context, void* data, int size)
+{
+    RenderResponse* response = ((RenderResponse*)context);
+    append_to_buffer(&response->image_raw_bytes, data, size);
+}
+
+float calc_ray_sphere_intersect(Vector3f ray_orig, Vector3f ray_dir, Vector3f sphere_pos)
+{
+    Vector3f oc = sub_v3f(ray_orig, sphere_pos);
+    float a = dot_v3f(ray_dir, ray_dir);
+    float b = 2.0 * dot_v3f(oc, ray_dir);
+    float c = dot_v3f(oc, oc) - (0.5f * 0.5f);
+    float d = b * b - (4 * a * c);
+
+    if(d < 0) {
+        return -1.0f;
+    }
+    return (-b - sqrt(d)) / (2.0 * a);
+}
+
+Vector3f trace_ray(Vector3f ray_orig, Vector3f ray_dir, RenderRequest* request)
+{
+    Vector3f ray_norm = normalize_v3f(&ray_dir);
+    Vector3f light = { 1.0f, 1.0f, 1.0f };
+    Vector3f dark  = { 0.0f, 0.0f, 0.0f };
+
+    float dist_along_ray = 0.0;
+    if((dist_along_ray = calc_ray_sphere_intersect(ray_orig, ray_norm, request->sphere_pos)) > 0) {
+        Vector3f point_on_sphere = add_v3f(ray_orig, mulf_v3f(ray_dir, dist_along_ray));
+        Vector3f normal = sub_v3f(point_on_sphere, request->sphere_pos);
+        Vector3f half = { 0.5, 0.5, 0.5 };
+        Vector3f vec_to_light = sub_v3f(request->light_pos, point_on_sphere);
+
+        float lightness = fmax(0.0f, dot_v3f(normal, normalize_v3f(&vec_to_light)));
+
+        return mulf_v3f(add_v3f(normal, half), lightness); 
+    }
+
+    return lerp_v3f(&light, &dark, 0.5f + ray_norm.y);
+}
+
+void render_image(RenderRequest* request, RenderResponse* response)
+{
+    const uint32_t num_image_bytes = request->image_width * request->image_height * NUM_CHANNELS;
+    response->pixel_buffer = allocate_buffer(num_image_bytes);
+
+    uint8_t* current_pixel = response->pixel_buffer.data;
+
+    Vector3f camera_pos = { 0.0f, 0.0f, 0.0f };
+    Vector3f ray_dir    = { 0.0f, 0.0f, 0.0f };
+    for(uint32_t y = 0; y < request->image_height; y++) {
+        for(uint32_t x = 0; x < request->image_width; x++) {
+
+            float u = (float) x / request->image_width;
+            float v = (float) y / request->image_height;
+
+            ray_dir.x = -0.5f + u;
+            ray_dir.y =  0.5f - v;
+            ray_dir.z =  1.0f;
+
+            Vector3f color = trace_ray(camera_pos, ray_dir, request);
+
+            current_pixel[0] = (uint8_t)( color.x * 255.0f);
+            current_pixel[1] = (uint8_t)( color.y * 255.0f);
+            current_pixel[2] = (uint8_t)( color.z * 255.0f);
+            current_pixel[3] = 0xFF;        
+            current_pixel += NUM_CHANNELS;
+        }   
+    }
+
+    stbi_write_jpg_to_func(&write_to_response_stbi,
+                           (void*) response,
+                           request->image_width,
+                           request->image_height,
+                           NUM_CHANNELS,
+                           response->pixel_buffer.data,
+                           10);
+
+    response->image_base64_encoded.data = (uint8_t*) base64_encode_fast((char*) response->image_raw_bytes.data,
+                                                                        response->image_raw_bytes.size);
+    response->image_base64_encoded.size = strlen(response->image_base64_encoded.data);
+}
+
+void handle_client_connection(int client_socket)
+{
+    RenderRequest request;
+    memset(&request, 0, sizeof(request));
+
+    int num_bytes_received = recv(client_socket, &request, sizeof(request), 0);
+    if (num_bytes_received < 0) {
+        fprintf(stderr, "Error: %d\n", errno);
+        return;
+    }
+
+    //printf("Received %d bytes from the client. Expected %lu\n", num_bytes_received, sizeof(request));
+
+    RenderResponse response;
+    memset(&response, 0, sizeof(response));
+
+    render_image(&request, &response);
+
+    int num_bytes_sent = send(client_socket, 
+                              response.image_base64_encoded.data, 
+                              response.image_base64_encoded.size,
+                              0);
+                              
+    if (num_bytes_sent < 0) {
+        fprintf(stderr, "Error: %d\n", errno);
+    }
+
+    //printf("Replied with %d bytes\n", num_bytes_sent);
+
+    deallocate_buffer(&response.pixel_buffer);
+    deallocate_buffer(&response.image_raw_bytes);
+    deallocate_buffer(&response.image_base64_encoded);
+    close(client_socket);
+
+    return;
+}
+
+void* thread_client_handler(void* ctx)
+{
+    ThreadContext* context = (ThreadContext*) ctx;
+    printf("Thread ready to accept connections!\n");
+    for(;;) {
+        pthread_mutex_lock(&context->mtx);
+        struct client_list* next_client = dequeue_client(&context->clients);
+        if(next_client == NULL) {
+            pthread_cond_wait(&context->cv, &context->mtx);
+            next_client = dequeue_client(&context->clients);
+        }
+        pthread_mutex_unlock(&context->mtx);
+
+        if(next_client != NULL) {
+            // We have a new client
+            handle_client_connection(next_client->client_fd);
+            close(next_client->client_fd);
+            free(next_client);
+        }
+    }
+    return NULL;
+}
+
